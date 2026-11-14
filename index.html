@@ -2278,7 +2278,7 @@
         // --- GITHUB PAGES / EXTERNAL HTTPS BRIDGE ---
         // นำ URL ของ Google Apps Script Web App (.../exec) มาวางในเครื่องหมายคำพูดด้านล่าง
         // เพื่อให้ทุกคนเปิดใช้งานจาก GitHub Pages ได้ทันทีโดยไม่ต้องตั้งค่าใหม่
-        const DEFAULT_GAS_API_URL = "";
+        const DEFAULT_GAS_API_URL = "https://script.google.com/macros/s/AKfycbzez3u1-WKIJHWHkVfHDCJFVlnUtqBenB1e5ch3G4EIad7KulEtP8YFpjr3rAaOqQjBdA/exec";
 
         function getGasApiUrl() {
             return (DEFAULT_GAS_API_URL || localStorage.getItem('gas_api_url') || '').trim();
