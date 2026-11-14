@@ -1243,6 +1243,12 @@
 
         <!-- Camera Toolbar for Mobile -->
         <div class="d-flex align-items-center justify-content-center gap-2 mt-3 flex-wrap">
+            <button type="button" class="btn btn-sm btn-outline-light rounded-pill px-3 py-1 d-none" onclick="Scanner.toggleTorch()" id="btnTorch">
+                <i class="fas fa-bolt me-1"></i> ไฟฉาย
+            </button>
+            <button type="button" class="btn btn-sm btn-outline-light rounded-pill px-3 py-1 d-none" onclick="Scanner.toggleZoom()" id="btnZoom">
+                <i class="fas fa-magnifying-glass-plus me-1"></i> ซูม 2x
+            </button>
             <button type="button" class="btn btn-sm btn-outline-light rounded-pill px-3 py-1" onclick="Scanner.switchCamera()" id="btnSwitchCam">
                 <i class="fas fa-camera-rotate me-1"></i> สลับกล้อง
             </button>
@@ -3868,71 +3874,167 @@
             html5QrcodeScanner: null,
             activeTarget: null,
             isScanning: false,
+            scanLocked: false,
+            isTorchOn: false,
+            isZoomed: false,
             availableCameras: [],
             currentCameraIndex: 0,
 
+            createInstance: function () {
+                const opts = { verbose: false };
+                if (typeof Html5QrcodeSupportedFormats !== 'undefined') {
+                    // จำกัดเฉพาะรูปแบบบาร์โค้ดสินค้าและ QR เพื่อลดภาระ CPU และถอดรหัสไวขึ้น 2-3 เท่า
+                    opts.formatsToSupport = [
+                        Html5QrcodeSupportedFormats.EAN_13,
+                        Html5QrcodeSupportedFormats.EAN_8,
+                        Html5QrcodeSupportedFormats.UPC_A,
+                        Html5QrcodeSupportedFormats.UPC_E,
+                        Html5QrcodeSupportedFormats.CODE_128,
+                        Html5QrcodeSupportedFormats.CODE_39,
+                        Html5QrcodeSupportedFormats.ITF,
+                        Html5QrcodeSupportedFormats.QR_CODE
+                    ];
+                }
+                return new Html5Qrcode("reader", opts);
+            },
+
+            getScanConfig: function (useHdConstraints = true) {
+                const cfg = {
+                    fps: 15,
+                    qrbox: (viewfinderWidth, viewfinderHeight) => {
+                        const w = Math.max(220, Math.min(Math.floor(viewfinderWidth * 0.85), 320));
+                        const h = Math.max(120, Math.min(Math.floor(viewfinderHeight * 0.45), 160));
+                        return { width: w, height: h };
+                    },
+                    aspectRatio: 1.0,
+                    disableFlip: false
+                };
+                if (useHdConstraints) {
+                    cfg.videoConstraints = {
+                        facingMode: "environment",
+                        width: { ideal: 1280 },
+                        height: { ideal: 720 },
+                        focusMode: "continuous"
+                    };
+                }
+                return cfg;
+            },
+
+            initTrackControls: function () {
+                this.isTorchOn = false;
+                this.isZoomed = false;
+                $('#btnTorch').addClass('d-none').removeClass('btn-warning text-dark').addClass('btn-outline-light');
+                $('#btnZoom').addClass('d-none').removeClass('btn-warning text-dark').addClass('btn-outline-light');
+
+                try {
+                    if (!this.html5QrcodeScanner || !this.html5QrcodeScanner.getRunningTrackCapabilities) return;
+                    const caps = this.html5QrcodeScanner.getRunningTrackCapabilities();
+                    if (caps && caps.torch) {
+                        $('#btnTorch').removeClass('d-none');
+                    }
+                    if (caps && caps.zoom && caps.zoom.max >= 2) {
+                        $('#btnZoom').removeClass('d-none');
+                    }
+                } catch (e) {}
+            },
+
+            toggleTorch: function () {
+                if (!this.html5QrcodeScanner || !this.isScanning) return;
+                const next = !this.isTorchOn;
+                this.html5QrcodeScanner.applyVideoConstraints({
+                    advanced: [{ torch: next }]
+                }).then(() => {
+                    this.isTorchOn = next;
+                    beep('click');
+                    if (next) $('#btnTorch').removeClass('btn-outline-light').addClass('btn-warning text-dark');
+                    else $('#btnTorch').removeClass('btn-warning text-dark').addClass('btn-outline-light');
+                }).catch(() => {});
+            },
+
+            toggleZoom: function () {
+                if (!this.html5QrcodeScanner || !this.isScanning) return;
+                const next = !this.isZoomed;
+                const zoomVal = next ? 2.0 : 1.0;
+                this.html5QrcodeScanner.applyVideoConstraints({
+                    advanced: [{ zoom: zoomVal }]
+                }).then(() => {
+                    this.isZoomed = next;
+                    beep('click');
+                    if (next) $('#btnZoom').removeClass('btn-outline-light').addClass('btn-warning text-dark');
+                    else $('#btnZoom').removeClass('btn-warning text-dark').addClass('btn-outline-light');
+                }).catch(() => {});
+            },
+
             start: function (target) {
                 this.activeTarget = target;
+                this.scanLocked = false;
                 const beginScan = () => {
                     $('#scanner-overlay').css('display', 'flex').addClass('fade-in');
                     $('#reader').empty();
-
-                    this.html5QrcodeScanner = new Html5Qrcode("reader");
-                    const config = {
-                        fps: 10,
-                        qrbox: { width: 260, height: 140 },
-                        aspectRatio: 1.0
-                    };
+                    this.html5QrcodeScanner = this.createInstance();
 
                     const onScanSuccess = (decodedText) => {
+                        if (this.scanLocked) return;
+                        this.scanLocked = true;
+                        if (navigator.vibrate) { try { navigator.vibrate(60); } catch (e) {} }
                         this.stop().then(() => {
                             this.handleScanResult(decodedText);
                         });
                     };
 
-                    // ลองเปิดกล้องหลังแบบ environment ก่อน (เหมือน index2.html)
+                    const onStarted = () => {
+                        this.isScanning = true;
+                        this.initTrackControls();
+                        Html5Qrcode.getCameras().then(devices => {
+                            if (devices && devices.length > 0) this.availableCameras = devices;
+                        }).catch(() => {});
+                    };
+
+                    // 1. ลองเปิดกล้องหลังความละเอียด HD + Continuous Autofocus ก่อน
                     this.html5QrcodeScanner.start(
                         { facingMode: "environment" },
-                        config,
+                        this.getScanConfig(true),
                         onScanSuccess,
                         () => { }
-                    ).then(() => {
-                        this.isScanning = true;
-                        Html5Qrcode.getCameras().then(devices => {
-                            if (devices && devices.length > 0) {
-                                this.availableCameras = devices;
-                            }
-                        }).catch(() => {});
-                    }).catch((err) => {
-                        console.warn("Direct environment camera failed, trying getCameras fallback:", err);
-                        // สร้าง instance ใหม่ก่อนลองเปิดจาก deviceId เพื่อไม่ให้ชนกับ instance เดิม
-                        Html5Qrcode.getCameras().then(devices => {
-                            if (devices && devices.length > 0) {
-                                this.availableCameras = devices;
-                                let camIndex = devices.findIndex(d =>
-                                    d.label.toLowerCase().includes('back') ||
-                                    d.label.toLowerCase().includes('rear') ||
-                                    d.label.toLowerCase().includes('environment')
-                                );
-                                if (camIndex === -1) camIndex = devices.length - 1;
-                                this.currentCameraIndex = camIndex;
+                    ).then(onStarted).catch((hdErr) => {
+                        console.warn("HD environment start failed, trying standard environment:", hdErr);
+                        // 2. Fallback: เปิดด้วย config มาตรฐาน (รองรับมือถือรุ่นเก่า/iOS)
+                        $('#reader').empty();
+                        this.html5QrcodeScanner = this.createInstance();
+                        this.html5QrcodeScanner.start(
+                            { facingMode: "environment" },
+                            this.getScanConfig(false),
+                            onScanSuccess,
+                            () => { }
+                        ).then(onStarted).catch((err) => {
+                            console.warn("Standard environment failed, trying deviceId:", err);
+                            // 3. Fallback: เลือกกล้องหลังตัวหลักจาก deviceId
+                            Html5Qrcode.getCameras().then(devices => {
+                                if (devices && devices.length > 0) {
+                                    this.availableCameras = devices;
+                                    let camIndex = devices.findIndex(d =>
+                                        d.label.toLowerCase().includes('back') ||
+                                        d.label.toLowerCase().includes('rear') ||
+                                        d.label.toLowerCase().includes('environment')
+                                    );
+                                    if (camIndex === -1) camIndex = devices.length - 1;
+                                    this.currentCameraIndex = camIndex;
 
-                                $('#reader').empty();
-                                this.html5QrcodeScanner = new Html5Qrcode("reader");
-                                this.html5QrcodeScanner.start(
-                                    devices[camIndex].id,
-                                    config,
-                                    onScanSuccess,
-                                    () => { }
-                                ).then(() => {
-                                    this.isScanning = true;
-                                }).catch(fallbackErr => {
-                                    this.showCameraError(fallbackErr);
-                                });
-                            } else {
-                                this.showCameraError(err);
-                            }
-                        }).catch(() => this.showCameraError(err));
+                                    $('#reader').empty();
+                                    this.html5QrcodeScanner = this.createInstance();
+                                    this.html5QrcodeScanner.start(
+                                        devices[camIndex].id,
+                                        this.getScanConfig(false),
+                                        onScanSuccess,
+                                        () => { }
+                                    ).then(onStarted).catch(fallbackErr => {
+                                        this.showCameraError(fallbackErr);
+                                    });
+                                } else {
+                                    this.showCameraError(err);
+                                }
+                            }).catch(() => this.showCameraError(err));
+                        });
                     });
                 };
 
@@ -3950,24 +4052,25 @@
                 }
                 this.currentCameraIndex = (this.currentCameraIndex + 1) % this.availableCameras.length;
                 const nextCamId = this.availableCameras[this.currentCameraIndex].id;
-                
+
                 this.stop().then(() => {
+                    this.scanLocked = false;
                     $('#scanner-overlay').css('display', 'flex');
-                    this.html5QrcodeScanner = new Html5Qrcode("reader");
-                    const config = {
-                        fps: 15,
-                        qrbox: { width: 280, height: 150 },
-                        aspectRatio: 1.0
-                    };
+                    $('#reader').empty();
+                    this.html5QrcodeScanner = this.createInstance();
                     this.html5QrcodeScanner.start(
                         nextCamId,
-                        config,
+                        this.getScanConfig(false),
                         (decodedText) => {
+                            if (this.scanLocked) return;
+                            this.scanLocked = true;
+                            if (navigator.vibrate) { try { navigator.vibrate(60); } catch (e) {} }
                             this.stop().then(() => this.handleScanResult(decodedText));
                         },
                         () => {}
                     ).then(() => {
                         this.isScanning = true;
+                        this.initTrackControls();
                         beep('click');
                     }).catch(e => console.error("Switch cam error:", e));
                 });
